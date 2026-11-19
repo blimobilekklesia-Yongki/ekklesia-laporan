@@ -93,4 +93,4 @@ with st.sidebar:
             st.rerun()
 
 try:
-    rows = sb.table("vehicles").select("id,data,created_at").order("created_at", desc=True).execute().data or []
+    response = (
