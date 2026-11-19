@@ -93,4 +93,117 @@ with st.sidebar:
             st.rerun()
 
 try:
-    response = (
+    response = sb.table("vehicles").select("id,data,created_at").order("created_at", desc=True).execute()
+    rows = response.data or []
+except Exception as e:
+    st.error(f"Tidak dapat membaca data kendaraan: {e}")
+    st.warning("Pastikan policy RLS tabel vehicles mengizinkan pengguna authenticated membaca data.")
+    st.stop()
+
+cars = []
+for row in rows:
+    data = dict(row.get("data") or {})
+    data["_id"] = row.get("id")
+    expense_keys = ["biaya_perbaikan", "biaya_servis", "biaya_pajak_admin", "biaya_lain"]
+    data["total_pengeluaran"] = sum(int(data.get(k, 0) or 0) for k in expense_keys)
+    data["total_modal"] = int(data.get("harga_beli", data.get("harga", 0)) or 0) + data["total_pengeluaran"]
+    cars.append(data)
+
+sold = [x for x in cars if x.get("status") == "Terjual"]
+available = [x for x in cars if x.get("status", "Tersedia") == "Tersedia"]
+omzet = sum(int(x.get("harga_jual", 0) or 0) for x in sold)
+profit = sum(int(x.get("harga_jual", 0) or 0) - int(x["total_modal"]) for x in sold)
+total_modal = sum(int(x["total_modal"]) for x in cars)
+
+# Dataset transaksi penjualan, angka tetap numerik untuk perhitungan dan ekspor.
+if sold:
+    df_raw = pd.DataFrame([{
+        "Mobil": x.get("nama", "-"),
+        "No. Polisi": x.get("plat", "-"),
+        "Tanggal Jual": x.get("tanggal_jual", ""),
+        "Harga Beli": int(x.get("harga_beli", x.get("harga", 0)) or 0),
+        "Pengeluaran": int(x["total_pengeluaran"]),
+        "Total Modal": int(x["total_modal"]),
+        "Harga Jual": int(x.get("harga_jual", 0) or 0),
+        "Laba/Rugi": int(x.get("harga_jual", 0) or 0) - int(x["total_modal"]),
+        "Pembeli": x.get("nama_pembeli", "-"),
+    } for x in sold])
+else:
+    df_raw = pd.DataFrame(columns=["Mobil", "No. Polisi", "Tanggal Jual", "Harga Beli", "Pengeluaran", "Total Modal", "Harga Jual", "Laba/Rugi", "Pembeli"])
+
+st.title("📊 EKKLESIA MOBIL")
+if menu == "Dashboard":
+    st.subheader("Dashboard Ringkasan Showroom")
+    st.caption("Pantauan cepat stok, penjualan, omzet, dan hasil usaha.")
+    a, b, c, d = st.columns(4)
+    a.metric("Stok tersedia", len(available))
+    b.metric("Unit terjual", len(sold))
+    c.metric("Omzet penjualan", rp(omzet))
+    d.metric("Laba / Rugi", rp(profit))
+    st.divider()
+    x, y = st.columns(2)
+    with x:
+        st.markdown("### Posisi kendaraan")
+        st.write(f"**Mobil tersedia:** {len(available)} unit")
+        st.write(f"**Mobil terjual:** {len(sold)} unit")
+        st.write(f"**Total kendaraan tercatat:** {len(cars)} unit")
+    with y:
+        st.markdown("### Ringkasan keuangan")
+        st.write(f"**Total modal seluruh mobil:** {rp(total_modal)}")
+        st.write(f"**Omzet penjualan:** {rp(omzet)}")
+        st.write(f"**Laba / rugi penjualan:** {rp(profit)}")
+    st.caption("Data diambil langsung dari database AutoLedger. Muat ulang halaman untuk mengambil perubahan terbaru.")
+
+elif menu == "Laporan Penjualan":
+    st.subheader("Laporan Penjualan Mobil")
+    st.caption("Rincian unit terjual berdasarkan rentang tanggal.")
+    if df_raw.empty:
+        st.info("Belum ada mobil berstatus Terjual.")
+    else:
+        dates = pd.to_datetime(df_raw["Tanggal Jual"], errors="coerce")
+        valid = dates.dropna()
+        if not valid.empty:
+            c1, c2 = st.columns(2)
+            start = c1.date_input("Dari tanggal", value=valid.min().date(), min_value=valid.min().date(), max_value=valid.max().date(), key="sales_start")
+            end = c2.date_input("Sampai tanggal", value=valid.max().date(), min_value=valid.min().date(), max_value=valid.max().date(), key="sales_end")
+            if start > end:
+                st.error("Tanggal awal tidak boleh melewati tanggal akhir.")
+                st.stop()
+            filtered_raw = df_raw.loc[(dates.dt.date >= start) & (dates.dt.date <= end)].copy()
+        else:
+            filtered_raw = df_raw.copy()
+            st.caption("Tanggal penjualan belum tersedia/valid pada sebagian data.")
+        a, b = st.columns(2)
+        a.metric("Jumlah transaksi pada filter", len(filtered_raw))
+        b.metric("Omzet pada filter", rp(filtered_raw["Harga Jual"].sum()))
+        display = filtered_raw.copy()
+        for col in ["Harga Beli", "Pengeluaran", "Total Modal", "Harga Jual", "Laba/Rugi"]:
+            display[col] = display[col].apply(rp)
+        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Unduh laporan penjualan CSV", data=filtered_raw.to_csv(index=False).encode("utf-8-sig"), file_name="laporan_penjualan_ekklesia.csv", mime="text/csv", use_container_width=True)
+
+else:
+    st.subheader("Laporan Laba / Rugi")
+    st.caption("Perbandingan harga jual dengan total modal setiap kendaraan yang sudah terjual.")
+    a, b, c = st.columns(3)
+    a.metric("Total omzet", rp(omzet))
+    b.metric("Total modal unit terjual", rp(df_raw["Total Modal"].sum() if not df_raw.empty else 0))
+    c.metric("Laba / Rugi bersih", rp(profit))
+    if not df_raw.empty:
+        profit_display = df_raw[["Mobil", "No. Polisi", "Total Modal", "Harga Jual", "Laba/Rugi"]].copy()
+        for col in ["Total Modal", "Harga Jual", "Laba/Rugi"]:
+            profit_display[col] = profit_display[col].apply(rp)
+        st.dataframe(profit_display, use_container_width=True, hide_index=True)
+        winners = int((df_raw["Laba/Rugi"] > 0).sum())
+        losses = int((df_raw["Laba/Rugi"] < 0).sum())
+        breakeven = int((df_raw["Laba/Rugi"] == 0).sum())
+        p, q, r = st.columns(3)
+        p.metric("Transaksi untung", winners)
+        q.metric("Transaksi rugi", losses)
+        r.metric("Impas", breakeven)
+        st.download_button("⬇️ Unduh laporan laba/rugi CSV", data=df_raw.to_csv(index=False).encode("utf-8-sig"), file_name="laporan_laba_rugi_ekklesia.csv", mime="text/csv", use_container_width=True)
+    else:
+        st.info("Belum ada data penjualan untuk dihitung laba/ruginya.")
+
+st.divider()
+st.caption("EKKLESIA MOBIL · Laporan terpisah yang terhubung ke database AutoLedger.")
